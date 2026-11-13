@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><!--TITULO--></title>
+<style>
+  :root { --fondo:#0b0d12; --tinta:#eef1f5; --suave:#98a2b0; --borde:#2a303b; --boton:#171b23; --activo:#f2b84b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--fondo); color:var(--tinta);
+         font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 1320px; margin: 0 auto; padding: 14px 16px 28px; }
+  canvas#escena { width:100%; height:auto; display:block; border-radius:10px; background:#000; }
+  .barra { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px; }
+  button, select { font: inherit; font-size:15px; color:var(--tinta); background:var(--boton);
+           border:1px solid var(--borde); border-radius:8px; padding:7px 12px; cursor:pointer; min-height:38px; }
+  button:hover { border-color: var(--activo); }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--activo); outline-offset:2px; }
+  button.principal { background:var(--activo); border-color:var(--activo); color:#14161c; font-weight:700; min-width:112px; }
+  button.grabando { background:#d64545; border-color:#d64545; color:#fff; }
+  input[type=range] { flex:1 1 220px; min-width:140px; accent-color: var(--activo); }
+  label { font-size:14px; color:var(--suave); }
+  .ayuda { margin-top:10px; font-size:13.5px; color:var(--suave); line-height:1.5; }
+  kbd { border:1px solid var(--borde); border-radius:4px; padding:0 5px; font-size:12px; background:var(--boton); }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="escena" width="1920" height="1080" aria-label="Película de la búsqueda"></canvas>
+  <div class="barra">
+    <button id="capAtras" title="Capítulo anterior">⏮ Capítulo</button>
+    <button id="atras" title="Un evento atrás">◀ Paso</button>
+    <button id="play" class="principal">▶ Reproducir</button>
+    <button id="adelante" title="Un evento adelante">Paso ▶</button>
+    <button id="capAdelante" title="Capítulo siguiente">Capítulo ⏭</button>
+    <button id="azar" title="Saltar a un evento cualquiera de este capítulo y pausar">Al azar</button>
+    <label for="vel">Velocidad</label>
+    <select id="vel"></select>
+    <input id="tiempo" type="range" min="0" max="1" value="0" step="1" aria-label="Posición en el capítulo">
+    <button id="grabar" title="Graba la película desde el comienzo y descarga el video">● Grabar video</button>
+  </div>
+  <p class="ayuda">Al pausar aparecen el número del evento, la pila y los contadores. <kbd>espacio</kbd> pausa, <kbd>←</kbd> <kbd>→</kbd> avanzan un evento.</p>
+</main>
+<script>/*THREE*/</script>
+<script>
+"use strict";
+const D = /*DATOS*/;
+const COLOR = ["#4fd08a", "#ff5d5d", "#5aa2ff", "#b184ff", "#ffa94d", "#ffd23f"];
+const VERBO = ["AVANZA", "TROPIEZA", "DEDUCE", "PODA", "RETROCEDE", "SOLUCIÓN"];
+const ROTULO = ["pasos", "tropiezos", "deducciones", "podas", "retrocesos", "soluciones"];
+const W = 1280, H = 720, ESC = 1.5;
+const FUENTE = 'system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif';
+const lienzo = document.getElementById("escena"), g = lienzo.getContext("2d");
+const [NF, NC] = D.fijo.n, CUEVA = D.fijo.a === "cueva", SALA = D.fijo.a === "sala";
+const ROSA = "#ff8a1e";                 // el color del hilo de Pixie y de su nombre (naranja)
+
+// azar repetible: la misma cueva se ve igual cada vez
+function azar(f, c, k) { const x = Math.sin(f * 127.1 + c * 311.7 + k * 74.7) * 43758.5453; return x - Math.floor(x); }
+
+// ====================================================================== la escena 3D
+const render = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+render.setSize(W * ESC, H * ESC, false);
+render.shadowMap.enabled = true; render.shadowMap.type = THREE.PCFSoftShadowMap;
+render.toneMapping = THREE.ACESFilmicToneMapping; render.toneMappingExposure = CUEVA ? 1.0 : SALA ? 0.95 : 0.82;
+const CIELO = CUEVA ? "#05070c" : SALA ? "#dfdee8" : "#20242e";
+render.setClearColor(CIELO);
+const escena = new THREE.Scene();
+escena.fog = CUEVA ? new THREE.FogExp2("#05070c", 0.036) : new THREE.Fog(CIELO, 40, 90);
+const camara = new THREE.PerspectiveCamera(CUEVA ? 30 : SALA ? 28 : 26, W / H, 0.5, 200);
+const mira = new THREE.Vector3(NC / 2 + (CUEVA ? 0 : -Math.max(NF, NC) * 0.16), 0, NF / 2 + (CUEVA ? 0 : 0.3)), miraMeta = mira.clone();
+const lado = Math.max(NF, NC);
+const BRAZO = CUEVA ? new THREE.Vector3(0.9, 9.4, 6.4) : SALA ? new THREE.Vector3(lado * 0.4, lado * 1.5 + 3.4, lado * 1.08 + 2.6) : new THREE.Vector3(lado * 0.7, lado * 1.55, lado * 1.45);
+
+const tapa = (c, o) => new THREE.MeshStandardMaterial(Object.assign({ color: c, roughness: 0.9, metalness: 0.0, flatShading: true }, o || {}));
+function pieza(geo, material, x, y, z, sombra) {
+  const m = new THREE.Mesh(geo, typeof material === "string" ? tapa(material) : material); m.position.set(x, y, z);
+  m.castShadow = sombra !== false; m.receiveShadow = true; return m;
+}
+const caja = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+const cil = (r1, r2, h, n) => new THREE.CylinderGeometry(r1, r2, h, n || 20);
+const bola = (r, a, b) => new THREE.SphereGeometry(r, a || 20, b || 14);
+
+function texturaBrillo(color) {
+  const c = document.createElement("canvas"); c.width = c.height = 128; const x = c.getContext("2d");
+  const gr = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, color); gr.addColorStop(0.35, color + "88"); gr.addColorStop(1, color + "00");
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c);
+}
+const BRILLOS = {};
+function brillo(color, tam, x, y, z, opacidad) {
+  if (!BRILLOS[color]) BRILLOS[color] = texturaBrillo(color);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: BRILLOS[color], blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: opacidad == null ? 1 : opacidad }));
+  s.scale.set(tam, tam, 1); s.position.set(x, y, z); return s;
+}
+function letrero(texto, color, px) {
+  const c = document.createElement("canvas"); c.width = 512; c.height = 128; const x = c.getContext("2d");
+  x.font = "800 " + px + "px " + FUENTE; x.fillStyle = color; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText(texto, 256, 66);
+  return new THREE.CanvasTexture(c);
+}
+
+// ---- luces ----
+let farol = null;
+if (CUEVA) {
+  escena.add(new THREE.HemisphereLight("#8399dd", "#10121a", 1.25));
+  const luna = new THREE.DirectionalLight("#8fa8ff", 1.1); luna.position.set(-6, 14, -4); escena.add(luna);
+  farol = new THREE.PointLight("#ffb561", 40, 14, 1.4); farol.castShadow = true; farol.shadow.mapSize.set(1024, 1024);
+  farol.shadow.bias = -0.002; farol.shadow.radius = 5; escena.add(farol);
+} else if (SALA) {                       // luz de estudio: brillante, neutra, sombras grises y suaves
+  escena.add(new THREE.HemisphereLight("#ffffff", "#c9ccd6", 2.3));
+  const sol = new THREE.DirectionalLight("#ffffff", 1.5); sol.position.set(NC / 2 - 5, 15, NF / 2 + 7); sol.target.position.set(NC / 2, 0, NF / 2);
+  sol.castShadow = true; sol.shadow.mapSize.set(2048, 2048); const sc = sol.shadow.camera;
+  sc.left = -lado; sc.right = lado; sc.top = lado; sc.bottom = -lado; sc.near = 1; sc.far = 60; sol.shadow.radius = 7; sol.shadow.bias = -0.0006;
+  escena.add(sol); escena.add(sol.target);
+} else {
+  escena.add(new THREE.HemisphereLight("#ffffff", "#7f8aa0", 0.95));
+  const sol = new THREE.DirectionalLight("#fff0d2", 2.1); sol.position.set(NC / 2 + 7, 16, NF / 2 - 5); sol.target.position.set(NC / 2, 0, NF / 2);
+  sol.castShadow = true; sol.shadow.mapSize.set(2048, 2048); const sc = sol.shadow.camera;
+  sc.left = -lado; sc.right = lado; sc.top = lado; sc.bottom = -lado; sc.near = 1; sc.far = 60; sol.shadow.radius = 5; sol.shadow.bias = -0.0005;
+  escena.add(sol); escena.add(sol.target);
+}
+
+// ---- lo que no cambia ----
+const HUECOS = new Set(), animados = [];
+const liso = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.7, metalness: 0 });
+function conBorde(malla) {               // el contorno negro fino de las piezas blancas
+  const l = new THREE.LineSegments(new THREE.EdgesGeometry(malla.geometry), new THREE.LineBasicMaterial({ color: "#1b1c20" })); malla.add(l); return malla;
+}
+function rayas(c1, c2) {
+  const c = document.createElement("canvas"); c.width = c.height = 128; const x = c.getContext("2d"); x.fillStyle = c1; x.fillRect(0, 0, 128, 128); x.strokeStyle = c2; x.lineWidth = 13;
+  for (let k = -128; k < 256; k += 32) { x.beginPath(); x.moveTo(k, 128); x.lineTo(k + 128, 0); x.stroke(); } return new THREE.CanvasTexture(c);
+}
+function azulejos(color, nx, ny) {
+  const c = document.createElement("canvas"); c.width = 64 * nx; c.height = 64 * ny; const x = c.getContext("2d"); x.fillStyle = color; x.fillRect(0, 0, c.width, c.height);
+  x.strokeStyle = "rgba(255,255,255,0.22)"; x.lineWidth = 2; for (let a = 0; a <= nx; a++) { x.beginPath(); x.moveTo(a * 64, 0); x.lineTo(a * 64, c.height); x.stroke(); }
+  for (let b = 0; b <= ny; b++) { x.beginPath(); x.moveTo(0, b * 64); x.lineTo(c.width, b * 64); x.stroke(); } return new THREE.CanvasTexture(c);
+}
+const paneles = [];                      // los contadores de siete segmentos colgados en la pared
+function siete(x, n, cx, cy, h) {        // dibuja el numero n centrado en (cx, cy) con digitos de alto h
+  const SEG = ["abcdef", "bc", "abged", "abgcd", "fgbc", "afgcd", "afgedc", "abc", "abcdefg", "abcdfg"], t = String(n), w = h * 0.52, sep = h * 0.2, g = h * 0.11;
+  let x0 = cx - (t.length * w + (t.length - 1) * sep) / 2; x.fillStyle = "#ffffff";
+  for (const d of t) { const s = SEG[+d] || ""; const y0 = cy - h / 2, H2 = h / 2;
+    const r = (a, b, c, e) => x.fillRect(x0 + a, y0 + b, c, e);
+    if (s.includes("a")) r(g, 0, w - 2 * g, g); if (s.includes("g")) r(g, H2 - g / 2, w - 2 * g, g); if (s.includes("d")) r(g, h - g, w - 2 * g, g);
+    if (s.includes("f")) r(0, g, g, H2 - 1.5 * g); if (s.includes("b")) r(w - g, g, g, H2 - 1.5 * g);
+    if (s.includes("e")) r(0, H2 + g / 2, g, H2 - 1.5 * g); if (s.includes("c")) r(w - g, H2 + g / 2, g, H2 - 1.5 * g);
+    x0 += w + sep; }
+}
+function panelPared(xc, y, ancho, alto, rotulo) {
+  const c = document.createElement("canvas"); c.width = 256; c.height = Math.round(256 * alto / ancho); const t = new THREE.CanvasTexture(c);
+  const m = new THREE.Mesh(caja(ancho, alto, 0.08), [0, 1, 2, 3, 4, 5].map(k => k === 4 ? new THREE.MeshBasicMaterial({ map: t }) : new THREE.MeshBasicMaterial({ color: "#0c0d10" })));
+  m.position.set(xc, y, 0.02); escena.add(m); const P = { lienzo: c, tex: t, valor: -1, rotulo: rotulo }; paneles.push(P); return P;
+}
+function pintaPanel(P, n) {
+  if (P.valor === n) return; P.valor = n; const x = P.lienzo.getContext("2d"), w = P.lienzo.width, h = P.lienzo.height;
+  x.fillStyle = "#0c0d10"; x.fillRect(0, 0, w, h); siete(x, n, w / 2, h * 0.46, h * 0.56);
+  x.fillStyle = "rgba(255,255,255,0.7)"; x.font = "700 " + Math.round(h * 0.13) + "px " + FUENTE; x.textAlign = "center"; x.fillText(P.rotulo, w / 2, h * 0.93); P.tex.needsUpdate = true;
+}
+let panelArriba = null, panelAbajo = null;
+if (SALA) {
+  // la sala es una losa que flota: piso de baldosas oscuras con junta blanca y canto grueso
+  escena.add(pieza(caja(NC + 0.04, 0.9, NF + 0.04), liso("#4b4c50"), NC / 2, -0.46, NF / 2));
+  escena.add(pieza(caja(NC, 0.04, NF), liso("#f4f4f6"), NC / 2, 0.012, NF / 2, false));
+  // dos paredes altas al fondo, del color de este mundo, con azulejos
+  const alto = 2.9, cp = D.fijo.w || "#4061B0";
+  const pn = pieza(caja(NC + 0.5, alto + 0.9, 0.5), new THREE.MeshStandardMaterial({ map: azulejos(cp, NC, 4), roughness: 0.8 }), NC / 2 - 0.25, alto / 2 - 0.46, -0.25); escena.add(pn);
+  const po = pieza(caja(0.5, alto + 0.9, NF), new THREE.MeshStandardMaterial({ map: azulejos(cp, NF, 4), roughness: 0.8 }), -0.25, alto / 2 - 0.46, NF / 2); escena.add(po);
+  panelArriba = panelPared(NC / 2 - 1.15, 1.75, 2.0, 1.25, "TROPIEZOS"); panelAbajo = panelPared(NC / 2 + 1.15, 1.75, 2.0, 1.25, "PASOS");
+}
+const fondoMundo = pieza(caja(NC + 60, 0.4, NF + 60), CUEVA ? "#07090d" : "#2a2f3b", NC / 2, CUEVA ? -2.6 : -0.32, NF / 2, false); if (!SALA) escena.add(fondoMundo);
+if (!CUEVA && !SALA) escena.add(pieza(caja(NC + 0.9, 0.5, NF + 0.9), "#f3efe8", NC / 2, -0.27, NF / 2));
+
+function mueble(tipo, color) {
+  const G = new THREE.Group(); const pon = (geo, col, x, y, z) => { const m = pieza(geo, col, x, y, z); G.add(m); return m; };
+  if (tipo === "cama") { pon(caja(0.8, 0.26, 0.9), color, 0, 0.13, 0); pon(caja(0.74, 0.1, 0.84), "#f3efe6", 0, 0.31, 0); pon(caja(0.5, 0.1, 0.24), "#ffffff", 0, 0.4, -0.27); }
+  else if (tipo === "mesa") { pon(caja(0.84, 0.08, 0.84), color, 0, 0.5, 0); for (const [a, b] of [[-1,-1],[1,-1],[-1,1],[1,1]]) pon(caja(0.08, 0.46, 0.08), color, a * 0.34, 0.23, b * 0.34); }
+  else if (tipo === "planta") { pon(cil(0.24, 0.18, 0.3, 8), "#b5653a", 0, 0.15, 0); pon(new THREE.IcosahedronGeometry(0.34, 0), color, 0, 0.6, 0); pon(new THREE.IcosahedronGeometry(0.22, 0), color, 0.14, 0.86, 0.05); }
+  else if (tipo === "estufa") { pon(caja(0.84, 0.6, 0.84), color, 0, 0.3, 0); pon(caja(0.86, 0.05, 0.86), "#2b2f3a", 0, 0.625, 0); for (const [a, b] of [[-1,-1],[1,-1],[-1,1],[1,1]]) pon(cil(0.12, 0.12, 0.03), "#e25555", a * 0.2, 0.66, b * 0.2); }
+  else if (tipo === "piano") { pon(caja(0.9, 0.62, 0.5), color, 0, 0.31, -0.12); pon(caja(0.9, 0.08, 0.26), color, 0, 0.42, 0.24); pon(caja(0.8, 0.03, 0.18), "#ffffff", 0, 0.475, 0.26); }
+  else if (tipo === "fuente") { pon(cil(0.44, 0.46, 0.24, 10), "#c9c2b4", 0, 0.12, 0); pon(cil(0.36, 0.36, 0.05, 10), color, 0, 0.25, 0); pon(cil(0.07, 0.09, 0.5, 8), "#c9c2b4", 0, 0.37, 0); }
+  else if (tipo === "barril") { pon(cil(0.3, 0.3, 0.66, 10), color, 0, 0.33, 0); pon(cil(0.315, 0.315, 0.05, 10), "#3b3f48", 0, 0.16, 0); pon(cil(0.315, 0.315, 0.05, 10), "#3b3f48", 0, 0.5, 0); }
+  else if (tipo === "telar") { pon(caja(0.08, 0.8, 0.08), color, -0.36, 0.4, 0); pon(caja(0.08, 0.8, 0.08), color, 0.36, 0.4, 0); pon(caja(0.8, 0.08, 0.08), color, 0, 0.78, 0); pon(caja(0.66, 0.5, 0.03), "#d9486e", 0, 0.45, 0); }
+  else pon(caja(0.7, 0.6, 0.7), color, 0, 0.3, 0);
+  return G;
+}
+
+for (const c of D.fijo.c) {
+  const f = c[1], k = c[2];
+  if (SALA && c[0] === "p") { escena.add(pieza(caja(0.955, 0.06, 0.955), liso(c[3] || "#5a5b5f"), k + 0.5, 0.02, f + 0.5, false)); }
+  else if (SALA && c[0] === "q") { escena.add(conBorde(pieza(caja(1.0, 0.95, 1.0), liso("#f1f2f4"), k + 0.5, 0.05 + 0.475, f + 0.5))); }
+  else if (SALA && c[0] === "u") {
+    HUECOS.add(f + "," + k); escena.add(pieza(caja(0.955, 0.02, 0.955), new THREE.MeshBasicMaterial({ color: "#08090b" }), k + 0.5, 0.036, f + 0.5, false));
+    const marco = new THREE.Mesh(new THREE.PlaneGeometry(0.955, 0.955), new THREE.MeshBasicMaterial({ map: rayas("#ffc400", "#17181c") })); marco.rotation.x = -Math.PI / 2; marco.position.set(k + 0.5, 0.047, f + 0.5); escena.add(marco);
+    const negro = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.7), new THREE.MeshBasicMaterial({ color: "#050506" })); negro.rotation.x = -Math.PI / 2; negro.position.set(k + 0.5, 0.049, f + 0.5); escena.add(negro);
+  }
+  else if (c[0] === "s") { const m = new THREE.Mesh(new THREE.PlaneGeometry(0.955, 0.955), new THREE.MeshBasicMaterial({ map: rayas("#3a3b3f", ROSA) })); m.rotation.x = -Math.PI / 2; m.position.set(k + 0.5, 0.053, f + 0.5); if (SALA) escena.add(m); }
+  else if (c[0] === "g") { if (SALA) escena.add(pieza(caja(0.955, 0.05, 0.955), new THREE.MeshStandardMaterial({ color: "#8dff6b", emissive: "#3fae22", emissiveIntensity: 0.35 }), k + 0.5, 0.06, f + 0.5, false)); }
+  else if (c[0] === "p") {
+    const col = new THREE.Color(c[3]); if (CUEVA) col.offsetHSL(0, 0, (azar(f, k, 1) - 0.5) * 0.07);
+    const alto = CUEVA ? 0.5 : 0.12, sube = CUEVA ? (azar(f, k, 2) - 0.5) * 0.06 : 0;
+    const losa = pieza(caja(CUEVA ? 1.0 : 0.96, alto, CUEVA ? 1.0 : 0.96), tapa(col), k + 0.5, -alto / 2 + 0.05 + sube, f + 0.5, false); escena.add(losa);
+    if (CUEVA && azar(f, k, 3) > 0.62) { const p = pieza(new THREE.DodecahedronGeometry(0.07 + azar(f, k, 4) * 0.06, 0), "#5b5046", k + 0.2 + azar(f, k, 5) * 0.6, 0.08, f + 0.2 + azar(f, k, 6) * 0.6); escena.add(p); }
+  } else if (c[0] === "q") {
+    const alto = 0.62 + azar(f, k, 8) * 0.16;
+    const base = pieza(caja(1.0, alto + 0.5, 1.0), tapa(new THREE.Color("#454c5e").offsetHSL(0, 0, (azar(f, k, 9) - 0.5) * 0.05)), k + 0.5, (alto - 0.5) / 2 + 0.05, f + 0.5); escena.add(base);
+    const n = 1 + Math.floor(azar(f, k, 7) * 2);
+    for (let j = 0; j < n; j++) {
+      const r = 0.2 + azar(f, k, 10 + j) * 0.16, tono = new THREE.Color("#515a70").offsetHSL(0, 0, (azar(f, k, 20 + j) - 0.5) * 0.08);
+      const roca = pieza(new THREE.DodecahedronGeometry(r, 0), tapa(tono), k + 0.3 + azar(f, k, 30 + j) * 0.4, alto + 0.08, f + 0.3 + azar(f, k, 50 + j) * 0.4);
+      roca.rotation.set(azar(f, k, 60 + j) * 3, azar(f, k, 70 + j) * 3, 0); escena.add(roca);
+    }
+    if (azar(f, k, 90) > 0.8) {                                  // un cristal que brilla
+      const tinte = azar(f, k, 91) > 0.5 ? "#59e0ff" : "#c57bff";
+      const cr = pieza(new THREE.OctahedronGeometry(0.13, 0), new THREE.MeshStandardMaterial({ color: tinte, emissive: tinte, emissiveIntensity: 2.2, flatShading: true }), k + 0.5, 1.02, f + 0.5, false);
+      cr.scale.y = 2.1; escena.add(cr); escena.add(brillo(tinte, 2.0, k + 0.5, 1.05, f + 0.5, 0.5));
+    }
+  } else if (c[0] === "u") {
+    HUECOS.add(f + "," + k);
+    escena.add(pieza(caja(1.0, 0.1, 1.0), "#020305", k + 0.5, -2.2, f + 0.5, false));
+    const niebla = brillo("#3b8bff", 2.6, k + 0.5, -0.1, f + 0.5, 0.7); escena.add(niebla); animados.push({ tipo: "late", obj: niebla, fase: azar(f, k, 3) * 6, base: 0.7 });
+    const borde = new THREE.Mesh(new THREE.TorusGeometry(0.46, 0.03, 6, 4), new THREE.MeshBasicMaterial({ color: "#2f6fe0" })); borde.rotation.x = Math.PI / 2; borde.rotation.z = Math.PI / 4; borde.position.set(k + 0.5, 0.02, f + 0.5); escena.add(borde);
+  } else if (c[0] === "m") {
+    const alto = (c[4] || c[3] === "S" || c[3] === "E") ? 0.2 : 1.0, horiz = (c[3] === "N" || c[3] === "S");
+    const x = k + (c[3] === "E" ? 1 : c[3] === "O" ? 0 : 0.5), z = f + (c[3] === "S" ? 1 : c[3] === "N" ? 0 : 0.5);
+    const muro = pieza(horiz ? caja(1.1, alto, 0.12) : caja(0.12, alto, 1.1), SALA ? liso(alto > 0.5 ? "#f1f2f4" : "#363739") : (alto > 0.5 ? "#f6f1e7" : "#cfc6b4"), x, 0.05 + alto / 2, z);
+    escena.add(SALA ? conBorde(muro) : muro);
+  } else if (c[0] === "b") { const m = mueble(c[3], c[4]); m.position.set(k + 0.5, 0.05, f + 0.5); escena.add(m); }
+  else if (c[0] === "r") {
+    const p = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.375), new THREE.MeshBasicMaterial({ map: letrero(c[3], "rgba(40,45,58,0.7)", 60), transparent: true, depthWrite: false }));
+    p.rotation.x = -Math.PI / 2; p.position.set(k + 0.5, 0.062, f + 0.5); escena.add(p);
+  }
+}
+
+// ---- lo que cambia ----
+const actores = new Map(), marcas = new THREE.Group(); escena.add(marcas);
+
+function hazConejo() {
+  const G = new THREE.Group(), cuerpo = new THREE.Group(); G.add(cuerpo);
+  const pelo = new THREE.MeshStandardMaterial({ color: SALA ? "#f6f2ea" : "#c4bcae", roughness: 0.9 }), rosa = new THREE.MeshStandardMaterial({ color: "#f29cb4", roughness: 0.8 });
+  const pon = (geo, m, x, y, z) => { const o = pieza(geo, m, x, y, z); cuerpo.add(o); return o; };
+  const tronco = pon(bola(0.27), pelo, 0, 0.3, -0.04); tronco.scale.set(1, 0.92, 1.18);
+  const cabeza = pon(bola(0.2), pelo, 0, 0.62, 0.14); cabeza.scale.set(1, 0.95, 1.05);
+  pon(bola(0.085), pelo, 0, 0.56, 0.31);                                              // hocico
+  pon(bola(0.03, 10, 8), rosa, 0, 0.59, 0.385);                                        // nariz
+  for (const s of [-1, 1]) {
+    const pupila = pon(bola(0.034, 10, 8), new THREE.MeshStandardMaterial({ color: "#16181f", roughness: 0.3 }), s * 0.1, 0.68, 0.29); (G.userData.pupilas = G.userData.pupilas || []).push(pupila); pupila.userData.x0 = s * 0.1;
+    const oreja = new THREE.Group(); oreja.position.set(s * 0.09, 0.78, 0.08); cuerpo.add(oreja);
+    const o1 = pieza(bola(0.07), pelo, 0, 0.2, 0); o1.scale.set(0.75, 3.1, 0.45); oreja.add(o1);
+    const o2 = pieza(bola(0.045), rosa, 0, 0.2, 0.022); o2.scale.set(0.7, 3.2, 0.3); oreja.add(o2);
+    oreja.rotation.z = -s * 0.16; (G.userData.orejas = G.userData.orejas || []).push(oreja);
+    pon(bola(0.085), pelo, s * 0.13, 0.08, 0.12).scale.set(0.8, 0.55, 1.5);            // patas
+  }
+  pon(bola(0.095), pelo, 0, 0.3, -0.36);                                               // cola
+  const ceniza = new THREE.MeshStandardMaterial({ color: "#1b1c20", roughness: 1 });    // la cruz de ceniza en la frente
+  const c1 = pon(bola(0.038, 10, 8), ceniza, 0, 0.772, 0.268); c1.scale.set(0.38, 1.2, 0.22); c1.rotation.x = -0.75;
+  const c2 = pon(bola(0.038, 10, 8), ceniza, 0, 0.778, 0.263); c2.scale.set(1.0, 0.38, 0.22); c2.rotation.x = -0.75;
+  cuerpo.scale.setScalar(1); G.userData.cuerpo = cuerpo; G.userData.talla = SALA ? 1.55 : 1.3; return G;
+}
+function hazActor(c) {
+  if (c[0] === "j") return hazConejo();
+  const G = new THREE.Group(); const pon = (geo, m, x, y, z) => { const o = pieza(geo, m, x, y, z); G.add(o); return o; };
+  if (c[0] === "h") {
+    const liso = new THREE.MeshStandardMaterial({ color: c[4], roughness: 0.6 });
+    pon(cil(0.17, 0.27, 0.52, 20), liso, 0, 0.31, 0); pon(bola(0.19), new THREE.MeshStandardMaterial({ color: "#f2d3b3", roughness: 0.7 }), 0, 0.72, 0);
+    pon(cil(0.2, 0.2, 0.06), liso, 0, 0.87, 0);
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: letrero(c[5], "#ffffff", 96), depthTest: false })); s.scale.set(1.5, 0.375, 1); s.position.set(0, 0.32, 0); s.renderOrder = 5; G.add(s);
+  } else if (c[0] === "k") {
+    const madera = tapa("#8a5a2b"), oro = new THREE.MeshStandardMaterial({ color: "#ffd23f", emissive: "#ffb300", emissiveIntensity: CUEVA ? 1.6 : 0.2, metalness: 0.6, roughness: 0.3 });
+    pon(caja(0.62, 0.34, 0.44), madera, 0, 0.22, 0); pon(cil(0.22, 0.22, 0.62, 10), tapa("#9c6a35"), 0, 0.39, 0).rotation.z = Math.PI / 2;
+    pon(caja(0.1, 0.5, 0.47), oro, 0, 0.3, 0); pon(caja(0.14, 0.12, 0.05), oro, 0, 0.36, 0.23);
+    if (CUEVA) { const b = brillo("#ffcf5a", 3.0, 0, 0.5, 0, 0.75); G.add(b); animados.push({ tipo: "late", obj: b, fase: 0, base: 0.75 }); }
+  } else pon(caja(0.66, 0.6, 0.66), tapa(c[4] || "#c58b4e"), 0, 0.35, 0);
+  return G;
+}
+
+let protagonista = null;
+// Fantasmas: las casillas por donde el protagonista ya paso en este capitulo. Las que siguen en el
+// camino actual van en blanco; las de ramas abandonadas (por donde se devolvio), en rojo apagado.
+const fantasmas = new THREE.Group(); escena.add(fantasmas);
+const RASTRO = [];                       // RASTRO[cap][i] = lista de casillas "f,c" visitadas hasta el evento i
+function casillaDe(cuadro) { for (const c of cuadro.c) if (c[0] === "j") return c[2] + "," + c[3]; return null; }
+function caminoDe(cuadro) { for (const c of cuadro.c) if (c[0] === "i") return new Set(c[1].map(x => x[0] + "," + x[1])); return new Set(); }
+function preparaRastro() {
+  CAPS.forEach((p, k) => { const vistas = new Set(), lista = [[]];
+    for (const e of p.ev) { const q = casillaDe(D.cuadros[e[1]]); if (q && !HUECOS.has(q)) vistas.add(q); lista.push(Array.from(vistas)); }
+    RASTRO[k] = lista; });
+}
+const matFantasma = new THREE.MeshStandardMaterial({ color: "#ffffff", transparent: true, opacity: 0.28, roughness: 0.9, depthWrite: false });
+const matAbandono = new THREE.MeshStandardMaterial({ color: "#c0504d", transparent: true, opacity: 0.22, roughness: 0.9, depthWrite: false });
+function fantasma(mat) {
+  const G = new THREE.Group(), b = (r, x, y, z, sx, sy, sz) => { const m = new THREE.Mesh(bola(r, 12, 9), mat); m.position.set(x, y, z); m.scale.set(sx || 1, sy || 1, sz || 1); G.add(m); };
+  b(0.27, 0, 0.3, -0.04, 1, 0.92, 1.18); b(0.2, 0, 0.62, 0.14); b(0.07, -0.09, 0.98, 0.08, 0.75, 3.1, 0.45); b(0.07, 0.09, 0.98, 0.08, 0.75, 3.1, 0.45);
+  G.scale.setScalar(1.25); return G;
+}
+let rastroPuesto = "";
+function ponFantasmas(cuadro) {
+  if (!RASTRO.length || !protagonista) { while (fantasmas.children.length) fantasmas.remove(fantasmas.children[0]); rastroPuesto = ""; return; }
+  const aqui = casillaDe(cuadro), camino = caminoDe(cuadro), lista = RASTRO[cap][i] || [], clave = cap + ":" + i;
+  if (clave === rastroPuesto) return; rastroPuesto = clave;
+  while (fantasmas.children.length) fantasmas.remove(fantasmas.children[0]);
+  for (const q of lista) { if (q === aqui) continue; const [f, c] = q.split(",").map(Number);
+    const g = fantasma(camino.has(q) ? matFantasma : matAbandono); g.position.set(c + 0.5, 0.05, f + 0.5); fantasmas.add(g); }
+}
+function ponCuadro(cuadro, tipoEvento, instantaneo) {
+  const vistos = new Set();
+  while (marcas.children.length) marcas.remove(marcas.children[0]);
+  for (const c of cuadro.c) {
+    if (c[0] === "h" || c[0] === "k" || c[0] === "j" || c[0] === "o") {
+      const nombre = c[1], f = c[2], col = c[3]; vistos.add(nombre);
+      const meta = new THREE.Vector3(col + 0.5, 0.05, f + 0.5), cae = HUECOS.has(f + "," + col);
+      let a = actores.get(nombre);
+      if (!a) {
+        a = { grupo: hazActor(c), desde: meta.clone(), hasta: meta.clone(), t: instantaneo ? 1 : 0, modo: "nace", giro: 0, conejo: c[0] === "j" };
+        a.grupo.position.copy(meta); escena.add(a.grupo); actores.set(nombre, a);
+        if (a.conejo) protagonista = a;
+      } else if (!a.hasta.equals(meta) || a.modo === "muere") {
+        const veniaDeCaer = a.cayendo;
+        a.desde = a.hasta.clone(); a.hasta = meta; a.t = instantaneo ? 1 : 0; a.modo = veniaDeCaer ? "nace" : "camina";
+        if (!veniaDeCaer) a.giroMeta = Math.atan2(meta.x - a.desde.x, meta.z - a.desde.z);
+      }
+      a.cayendo = cae; a.tropieza = (tipoEvento === 1);
+    } else if (c[0] === "x") {
+      for (const giro of [Math.PI / 4, -Math.PI / 4]) { const m = new THREE.Mesh(caja(0.62, 0.03, 0.11), new THREE.MeshBasicMaterial({ color: c[3] })); m.position.set(c[2] + 0.5, 0.075, c[1] + 0.5); m.rotation.y = giro; marcas.add(m); }
+    } else if (c[0] === "l") {
+      const m = new THREE.Mesh(caja(SALA ? 0.34 : 0.9, 0.02, SALA ? 0.34 : 0.9), new THREE.MeshBasicMaterial({ color: SALA ? "#8dff6b" : c[3], transparent: true, opacity: SALA ? 0.9 : 0.75 })); m.position.set(c[2] + 0.5, 0.068, c[1] + 0.5); marcas.add(m);
+    } else if (c[0] === "n") {
+      const anillo = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.045, 8, 28), new THREE.MeshBasicMaterial({ color: c[3] })); anillo.rotation.x = Math.PI / 2; anillo.position.set(c[2] + 0.5, 0.14, c[1] + 0.5); marcas.add(anillo);
+      for (const giro of [Math.PI / 4, -Math.PI / 4]) { const m = new THREE.Mesh(caja(0.78, 0.05, 0.1), new THREE.MeshBasicMaterial({ color: c[3] })); m.position.set(c[2] + 0.5, 0.14, c[1] + 0.5); m.rotation.y = giro; marcas.add(m); }
+      const haz = new THREE.Mesh(cil(0.05, 0.16, 1.6, 10), new THREE.MeshBasicMaterial({ color: c[3], transparent: true, opacity: 0.22 })); haz.position.set(c[2] + 0.5, 0.95, c[1] + 0.5); marcas.add(haz);
+      if (!SALA) marcas.add(brillo(c[3], 1.7, c[2] + 0.5, 0.3, c[1] + 0.5, 0.5));
+    } else if (c[0] === "w") {
+      for (let j = 0; j < 4; j++) { const s = brillo("#cfe9ff", 0.34, c[2] + 0.5, 0.5, c[1] + 0.5, 0.55); s.userData = { cx: c[2] + 0.5, cz: c[1] + 0.5, fase: j * 1.57 + c[1] }; s.userData.brisa = true; marcas.add(s); }
+    } else if (c[0] === "i") {
+      const hilo = new THREE.MeshBasicMaterial({ color: SALA ? ROSA : "#ffcf5a" });
+      for (let j = 1; j < c[1].length; j++) {
+        const [f1, c1] = c[1][j - 1], [f2, c2] = c[1][j]; if (HUECOS.has(f2 + "," + c2)) continue;
+        const m = new THREE.Mesh(caja(Math.abs(c2 - c1) + 0.06, 0.035, Math.abs(f2 - f1) + 0.06), hilo); m.position.set((c1 + c2) / 2 + 0.5, SALA ? 0.075 : 0.085, (f1 + f2) / 2 + 0.5); if (SALA) m.scale.set(Math.abs(c2 - c1) ? 1 : 2.4, 1, Math.abs(f2 - f1) ? 1 : 2.4); marcas.add(m);
+      }
+    } else if (c[0] === "f") {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: letrero(c[3], c[4], 100), depthTest: false })); s.scale.set(1.8, 0.45, 1); s.position.set(c[2] + 0.5, 0.5, c[1] + 0.5); marcas.add(s);
+    }
+  }
+  for (const [nombre, a] of actores) if (!vistos.has(nombre) && a.modo !== "muere") { a.modo = "muere"; a.t = instantaneo ? 1 : 0; }
+  ponFantasmas(cuadro);
+}
+
+let reloj = 0;
+function animaTodo(dt, dur) {
+  reloj += dt;
+  for (const [nombre, a] of actores) {
+    a.t = Math.min(1, a.t + dt / (a.cayendo && a.modo === "camina" ? dur * 1.9 : dur));
+    const t = a.t, k = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2, G = a.grupo, cuerpo = G.userData.cuerpo;
+    G.visible = true;
+    if (a.modo === "nace") { G.position.set(a.hasta.x, a.hasta.y + (1 - k) * 1.6, a.hasta.z); G.scale.setScalar((0.4 + 0.6 * k) * (G.userData.talla || 1)); }
+    else if (a.modo === "camina") {
+      const hop = Math.min(1, t / 0.55), e = hop < 0.5 ? 2 * hop * hop : 1 - Math.pow(-2 * hop + 2, 2) / 2;
+      G.position.lerpVectors(a.desde, a.hasta, a.cayendo ? e : k); G.position.y = 0.05 + Math.sin(Math.PI * (a.cayendo ? e : k)) * 0.38; G.scale.setScalar(G.userData.talla || 1);
+      if (a.cayendo && t > 0.55) { const c = (t - 0.55) / 0.45; G.position.y = 0.05 - c * c * 3.2; G.scale.setScalar(Math.max(0.05, 1 - c * 0.8) * (G.userData.talla || 1)); G.rotation.x = c * 2.4; } else G.rotation.x = 0;
+    } else if (a.modo === "muere") { G.scale.setScalar(Math.max(0.001, 1 - k)); if (a.t >= 1) { escena.remove(G); actores.delete(nombre); } }
+    if (a.giroMeta != null) { let d = a.giroMeta - a.giro; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; a.giro += d * Math.min(1, dt * 14); G.rotation.y = a.giro; }
+    if (cuerpo) {                                             // aplastar y estirar; orejas con retraso
+      const aire = (a.modo === "camina" && !a.cayendo) ? Math.sin(Math.PI * k) : 0, quieto = Math.sin(reloj * 3.2) * 0.018;
+      cuerpo.scale.set(1 - aire * 0.1, 1 + aire * 0.2 + quieto, 1 - aire * 0.1);
+      (G.userData.orejas || []).forEach((o, j) => { o.rotation.x = -aire * 0.7 + Math.sin(reloj * 2.3 + j) * 0.05 + (a.tropieza ? 0.5 : 0); });
+      const parpadea = (reloj + 1.3) % 3.7 < 0.13;
+      (G.userData.pupilas || []).forEach(q => { q.scale.y = parpadea ? 0.12 : 1; });
+    }
+    if (a.tropieza && !a.cayendo && a.modo !== "muere") G.rotation.z = Math.sin(reloj * 40) * 0.12 * (1 - a.t * 0.5); else G.rotation.z = 0;
+  }
+  for (const s of marcas.children) if (s.userData && s.userData.brisa) {
+    const u = s.userData, ang = reloj * 2.2 + u.fase; s.position.set(u.cx + Math.cos(ang) * 0.3, 0.35 + ((reloj * 0.5 + u.fase) % 1) * 0.7, u.cz + Math.sin(ang) * 0.3);
+    s.material.opacity = 0.55 * (1 - ((reloj * 0.5 + u.fase) % 1));
+  }
+  for (const an of animados) an.obj.material.opacity = an.base * (0.75 + 0.25 * Math.sin(reloj * 2 + an.fase));
+  // la camara sigue al protagonista; si no hay, mira el centro
+  if (CUEVA && protagonista && actores.has("Pixie")) { const p = protagonista.grupo.position; miraMeta.set(p.x, 0, p.z); }
+  if (SALA) { const p = protagonista && actores.has("Pixie") ? protagonista.grupo.position : null; miraMeta.set(NC / 2 + (p ? (p.x - NC / 2) * 0.25 : 0), 0, NF / 2 - lado * 0.17 + (p ? (p.z - NF / 2) * 0.25 : 0)); }
+  mira.lerp(miraMeta, Math.min(1, dt * 2.2));
+  const vaiven = Math.sin(reloj * 0.18) * 0.5;
+  camara.position.set(mira.x + BRAZO.x + vaiven, BRAZO.y, mira.z + BRAZO.z - vaiven * 0.4); camara.lookAt(mira.x, 0.2, mira.z);
+  if (farol) { const p = protagonista ? protagonista.grupo.position : mira; farol.position.set(p.x, Math.max(2.8, p.y + 2.9), p.z + 0.6); farol.intensity = 40 * (0.93 + 0.07 * Math.sin(reloj * 9.0) * Math.sin(reloj * 3.1)); }
+}
+function limpiaActores() { for (const [n, a] of actores) escena.remove(a.grupo); actores.clear(); protagonista = null; }
+
+// ====================================================================== la pelicula
+const CAPS = D.caps;
+for (const p of CAPS) { p.acum = [new Array(6).fill(0)]; for (const e of p.ev) { const c = p.acum[p.acum.length - 1].slice(); c[e[0]]++; p.acum.push(c); } p.recortada = p.ev.length < p.total; }
+const PILA = Math.max(1, ...CAPS.map(p => p.pila));
+let cap = 0, i = 0, andando = false, porSegundo = D.velocidad, deuda = 0, antes = performance.now(), espera = 0;
+let cartel = { tipo: "portada", t: 0 };
+const pequeno = document.createElement("canvas"); pequeno.width = 480; pequeno.height = 270; const gp = pequeno.getContext("2d");
+const FILTRO = "filter" in g;
+
+const miles = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+function tarjeta(x, y, w, h, r, relleno, borde, gr) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+  if (relleno) { g.fillStyle = relleno; g.fill(); } if (borde) { g.strokeStyle = borde; g.lineWidth = gr || 1; g.stroke(); }
+}
+function letra(t, x, y, px, color, peso, alinea, sombra) {
+  g.font = (peso || 400) + " " + px + "px " + FUENTE; g.textAlign = alinea || "left"; g.textBaseline = "middle";
+  if (SALA && !enCartel && sombra !== false) {         // en la sala clara, el texto va sobre una caja negra
+    const an = g.measureText(t).width, x0 = alinea === "right" ? x - an : alinea === "center" ? x - an / 2 : x;
+    g.fillStyle = "rgba(0,0,0,0.8)"; g.fillRect(x0 - 6, y - px * 0.72, an + 12, px * 1.44);
+  } else if (sombra !== false) { g.shadowColor = "rgba(0,0,0,0.75)"; g.shadowBlur = 8; g.shadowOffsetY = 1; }
+  g.fillStyle = color; g.fillText(t, x, y); g.shadowColor = "transparent"; g.shadowBlur = 0; g.shadowOffsetY = 0;
+}
+function renglones(t, ancho, px, peso) {
+  g.font = (peso || 400) + " " + px + "px " + FUENTE; const out = []; let linea = "";
+  for (const pal of t.split(" ")) { const prueba = linea ? linea + " " + pal : pal; if (g.measureText(prueba).width > ancho && linea) { out.push(linea); linea = pal; } else linea = prueba; }
+  if (linea) out.push(linea); return out;
+}
+const eventoActual = () => i > 0 ? CAPS[cap].ev[i - 1] : null;
+const VERDE = "#8dff6b", ROJO = "#ff5a5a", AMARILLO = "#ffd84a", CLAVE = { pixie: ROSA };
+for (const w of ["cofre", "seguro", "segura", "seguras", "llegó", "supo", "aprende", "anota"]) CLAVE[w] = VERDE;
+for (const w of ["pozo", "pozos", "cae", "caer", "cayó", "falla", "apaga", "apague", "caíste", "caída"]) CLAVE[w] = ROJO;
+for (const w of ["bien", "eso", "supiste", "aprendas"]) CLAVE[w] = VERDE;
+for (const w of ["hilo", "libreta", "brisa", "aceite", "memoria", "farol"]) CLAVE[w] = AMARILLO;
+let enCartel = false;
+
+// ---------- el narrador ----------
+let audioCtx = null, salidaGrabacion = null, sonando = null, narra = null;      // narra: {texto, t, dura}
+const VOCES = {};
+function preparaAudio() {
+  if (audioCtx) return; const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+  audioCtx = new AC(); salidaGrabacion = audioCtx.createMediaStreamDestination();
+  CAPS.forEach((p, k) => { for (const e in (p.voz || {})) { const uri = p.voz[e][1]; if (!uri) continue;
+    try { const bin = atob(uri.slice(uri.indexOf(",") + 1)), bytes = new Uint8Array(bin.length); for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+      const listo = buf => { VOCES[k + ":" + e] = buf; }, r = audioCtx.decodeAudioData(bytes.buffer, listo, () => {}); if (r && r.catch) r.catch(() => {}); } catch (err) {} } });
+}
+function callaNarrador() { if (sonando) { try { sonando.stop(); } catch (e) {} sonando = null; } narra = null; }
+function lineaNarrador() { const v = CAPS[cap].voz; return v && v[String(i)] ? v[String(i)] : null; }
+function dispara() {                    // al llegar a un evento con linea de guion, mientras se reproduce
+  const L = lineaNarrador(); if (!L) return 0;
+  let dura = Math.max(2.4, L[0].length / 15); const buf = VOCES[cap + ":" + i];
+  if (buf && audioCtx && audioCtx.state === "running") { const src = audioCtx.createBufferSource(); src.buffer = buf; src.connect(audioCtx.destination); src.connect(salidaGrabacion); src.start(); sonando = src; dura = buf.duration + 0.5; }
+  else if (L[1]) { try { const el = new Audio(L[1]); el.play().catch(() => {}); sonando = { stop: () => el.pause() }; if (buf) dura = buf.duration + 0.5; else el.onloadedmetadata = () => { if (narra) narra.dura = el.duration + 0.5; }; } catch (err) {} }
+  narra = { texto: L[0], t: 0, dura: dura }; return dura;
+}
+
+function pinta(dt) {
+  const p = CAPS[cap], ev = eventoActual(), cuadro = ev ? D.cuadros[ev[1]] : null;
+  animaTodo(dt, Math.max(0.06, Math.min(0.5, 0.8 / porSegundo)));
+  render.render(escena, camara);
+  g.setTransform(ESC, 0, 0, ESC, 0, 0);
+  g.drawImage(render.domElement, 0, 0, W, H);
+  if (FILTRO) {                                               // resplandor: la misma imagen, borrosa, sumada encima
+    gp.filter = "blur(6px) brightness(1.1) contrast(1.35)"; gp.drawImage(render.domElement, 0, 0, 480, 270); gp.filter = "none";
+    g.globalCompositeOperation = "lighter"; g.globalAlpha = CUEVA ? 0.22 : SALA ? 0 : 0.07; g.drawImage(pequeno, 0, 0, W, H); g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
+  }
+  const vi = g.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95); vi.addColorStop(0, "rgba(0,0,0,0)"); vi.addColorStop(1, CUEVA ? "rgba(0,0,0,0.62)" : SALA ? "rgba(0,0,0,0.16)" : "rgba(0,0,0,0.5)");
+  g.fillStyle = vi; g.fillRect(0, 0, W, H);
+  if (ev && ev[0] === 1) { g.fillStyle = "rgba(255,40,40," + (0.16 * Math.max(0, 1 - (protagonista ? protagonista.t : 1))) + ")"; g.fillRect(0, 0, W, H); }
+
+  // arriba a la izquierda: donde estamos
+  const detalle = !andando;                               // en reproduccion solo se ve lo que importa; al pausar, todo
+  if (detalle) { letra(D.titulo.toUpperCase(), 34, 40, 15, SALA ? "#ffffff" : "rgba(255,255,255,0.72)", 700); letra(p.nombre, 34, 70, 30, "#ffffff", 800); }
+  else letra(p.nombre, 34, 40, 19, "#ffffff", 700);
+  // arriba a la derecha: los numeros que importan
+  const cuenta = p.acum[i], muestra = SALA ? [2, 3] : [1, 0, 2, 3];
+  if (SALA) { pintaPanel(panelArriba, cuenta[1]); pintaPanel(panelAbajo, cuenta[0]); }
+  let x = W - 34;
+  for (const t of (detalle ? muestra : []).slice().reverse()) {
+    if (p.cuenta[t] === 0 && CAPS.every(q => q.cuenta[t] === 0)) continue;
+    letra(ROTULO[t].toUpperCase(), x, 36, 12, "rgba(255,255,255,0.7)", 700, "right");
+    letra(miles(cuenta[t]), x, 66, t === 1 ? 40 : 30, COLOR[t], 800, "right");
+    g.font = "700 12px " + FUENTE; x -= Math.max(g.measureText(ROTULO[t].toUpperCase()).width, 54) + 30;
+  }
+  // el hilo (la pila), abajo a la izquierda
+  const prof = ev ? ev[2] : 0, np = PILA, bw = Math.max(3, Math.min(14, 330 / np - 2));
+  if (detalle) letra("PILA  " + prof, 34, H - 62, 12, "rgba(255,255,255,0.7)", 700);
+  for (let j = 0; j < (detalle ? np : 0); j++) { g.fillStyle = j < prof ? "#ffcf5a" : "rgba(255,255,255,0.16)"; g.fillRect(34 + j * (bw + 2), H - 46, bw, 9); }
+  if (detalle) letra(p.recortada ? "primeros " + miles(p.ev.length) + " de " + miles(p.total) + " eventos" : "evento " + miles(i) + " de " + miles(p.total), 34, H - 22, 12.5, "rgba(255,255,255,0.6)", 400);
+  // el panel del mundo, si lo hay
+  const panel = cuadro && cuadro.p;
+  if (panel) {
+    let yy = 130; letra(panel[0].toUpperCase(), 34, yy - 24, 12, "rgba(255,255,255,0.7)", 700);
+    for (const L of panel.slice(1)) { const rs = renglones(L[0], 300, 14, L[2] ? 700 : 400); if (yy > H - 130) break;
+      g.fillStyle = L[1] === "bien" ? COLOR[0] : L[1] === "mal" ? COLOR[1] : "rgba(255,255,255,0.3)"; g.beginPath(); g.arc(40, yy, 4.5, 0, 2 * Math.PI); g.fill();
+      rs.forEach((r, k) => letra(r, 54, yy + k * 18, 14, L[2] ? "#ffffff" : "rgba(255,255,255,0.82)", L[2] ? 700 : 400)); yy += rs.length * 18 + 8; }
+  }
+  // el subtitulo: lo que acaba de pasar
+  if (ev && !narra && (detalle || ev[0] === 1 || ev[0] === 2 || ev[0] === 3 || ev[0] === 5)) {
+    const texto = (detalle || ev[0] !== 5) ? (ev[3] || "") : "", px = detalle ? 22 : 19; g.font = "800 15px " + FUENTE; const av = g.measureText(VERBO[ev[0]]).width + 26;
+    g.font = "500 " + px + "px " + FUENTE; const at = texto ? g.measureText(texto).width + 18 : 0, ancho = Math.min(W - 420, av + at + 30), x0 = W / 2 - ancho / 2, y0 = H - 74;
+    tarjeta(x0, y0, ancho, 48, 24, "rgba(8,10,14,0.72)");
+    tarjeta(x0 + 9, y0 + 9, av, 30, 15, COLOR[ev[0]]); letra(VERBO[ev[0]], x0 + 9 + av / 2, y0 + 25, 15, "#0b0d12", 800, "center", false);
+    if (texto) { let t = texto; g.font = "500 " + px + "px " + FUENTE; while (t.length > 1 && g.measureText(t).width > ancho - av - 40) t = t.slice(0, -2) + "…"; letra(t, x0 + av + 22, y0 + 25, px, "#ffffff", 500, "left", false); }
+  }
+  const m = cuadro && cuadro.m;                                 // el medidor del mundo (aceite, combustible...)
+  if (m) { const an = 190, x0 = W - 34 - 190, lleno = Math.max(0, Math.min(1, m[1] / m[2]));
+    letra(m[0].toUpperCase() + (detalle ? "  " + m[1] : ""), x0, H - 62, 12, "rgba(255,255,255,0.7)", 700);
+    g.fillStyle = "rgba(255,255,255,0.16)"; g.fillRect(x0, H - 46, an, 9); g.fillStyle = lleno > 0.25 ? "#ffa94d" : "#ff5d5d"; g.fillRect(x0, H - 46, an * lleno, 9); }
+  // el narrador: su texto aparece letra por letra
+  const L = lineaNarrador(), dicho = narra ? narra.texto : (L && !andando ? L[0] : null);
+  if (dicho) {                                          // cajas negras ajustadas al texto, cerca de Pixie, con palabras clave en color
+    const px = 25, rs = renglones(dicho, 700, px, 600);
+    let quedan = narra ? Math.ceil(dicho.length * Math.min(1, narra.t / Math.max(0.6, narra.dura * 0.55))) : dicho.length;
+    let ax = W / 2, ay = H - 150 - rs.length * 38;
+    if (SALA && protagonista) { const v = protagonista.grupo.position.clone(); v.y += 1.7; v.project(camara);
+      ax = Math.max(390, Math.min(W - 390, (v.x + 1) / 2 * W)); ay = Math.max(120, Math.min(H - 210, (1 - v.y) / 2 * H - rs.length * 38 - 6)); }
+    rs.forEach((r, k) => { const parte = r.slice(0, Math.max(0, quedan)); quedan -= r.length + 1; if (!parte) return;
+      g.font = "600 " + px + "px " + FUENTE; const x0 = ax - g.measureText(r).width / 2, y = ay + k * 38;
+      g.fillStyle = "rgba(0,0,0,0.84)"; g.fillRect(x0 - 9, y - 18, g.measureText(parte).width + 18, 36);
+      let x = x0; g.textAlign = "left"; g.textBaseline = "middle";
+      for (const pal of parte.split(" ")) { g.fillStyle = CLAVE[pal.toLowerCase().replace(/[.,:;!?¿¡]/g, "")] || "#ffffff"; g.fillText(pal, x, y + 1); x += g.measureText(pal + " ").width; } });
+  }
+  if (cuadro && cuadro.v) { g.font = "800 30px " + FUENTE; const an = g.measureText(cuadro.v).width + 64; tarjeta(W / 2 - an / 2, 118, an, 62, 31, COLOR[5]); letra(cuadro.v, W / 2, 150, 30, "#14161c", 800, "center", false); }
+  if (cartel) pintaCartel();
+  tiempo.max = p.ev.length; tiempo.value = i;
+}
+
+function pintaCartel() {
+  enCartel = true;
+  const a = Math.min(1, cartel.t / 0.3);
+  g.fillStyle = "rgba(5,7,12," + (cartel.tipo === "capitulo" ? 0.66 * a : 0.86 * a) + ")"; g.fillRect(0, 0, W, H); g.globalAlpha = a;
+  if (cartel.tipo === "portada") {
+    letra(D.titulo, W / 2, 270, 64, "#ffffff", 800, "center");
+    renglones(D.pregunta, 900, 26, 400).forEach((r, k) => letra(r, W / 2, 350 + k * 36, 26, COLOR[5], 500, "center"));
+    letra(CAPS.length + " generaciones del mismo agente", W / 2, 470, 18, "rgba(255,255,255,0.65)", 400, "center");
+  } else if (cartel.tipo === "capitulo") {
+    const p = CAPS[cap]; letra(p.nombre, W / 2, 320, 56, "#ffffff", 800, "center");
+    renglones(p.desc, 860, 23, 400).forEach((r, k) => letra(r, W / 2, 392 + k * 32, 23, "rgba(255,255,255,0.8)", 400, "center"));
+  } else {
+    letra("Lo que cambió entre generaciones", W / 2, 150, 40, "#ffffff", 800, "center");
+    const cols = ["", "pasos", "tropiezos", "deducciones", "podas", "eventos"], x0 = 190, dx = [0, 400, 520, 650, 760, 900];
+    cols.forEach((c, k) => letra(c.toUpperCase(), x0 + dx[k], 232, 13, "rgba(255,255,255,0.65)", 700, k ? "right" : "left"));
+    CAPS.forEach((p, j) => { const y = 284 + j * 62; tarjeta(x0 - 22, y - 28, 950, 54, 12, "rgba(255,255,255,0.07)");
+      letra(p.nombre, x0, y, 21, "#ffffff", 700);
+      [p.cuenta[0], p.cuenta[1], p.cuenta[2], p.cuenta[3], p.total].forEach((v, k) => letra(miles(v), x0 + dx[k + 1], y, 22, k === 1 ? COLOR[1] : k === 4 ? COLOR[5] : "#ffffff", 800, "right")); });
+    let res = ""; for (const p of CAPS) for (const e of p.ev) if (D.cuadros[e[1]].v) res = D.cuadros[e[1]].v;
+    if (res) letra(res, W / 2, 300 + CAPS.length * 62 + 44, 30, COLOR[5], 800, "center");
+  }
+  g.globalAlpha = 1; enCartel = false;
+}
+
+// ---------- controles ----------
+const play = document.getElementById("play"), tiempo = document.getElementById("tiempo"), vel = document.getElementById("vel"), grabar = document.getElementById("grabar");
+for (const v of [1, 2, 3, 6, 12, 25, 60, 150]) { const o = document.createElement("option"); o.value = v; o.textContent = v + " por segundo"; vel.appendChild(o); }
+if (![...vel.options].some(o => +o.value === porSegundo)) porSegundo = 3;
+vel.value = porSegundo;
+function muestra(instantaneo) { const ev = eventoActual(); if (ev) ponCuadro(D.cuadros[ev[1]], ev[0], instantaneo); else ponCuadro(D.cuadros[CAPS[cap].ev[0][1]], -1, true); }
+function ir(n, instantaneo) { callaNarrador(); cartel = null; i = Math.max(0, Math.min(CAPS[cap].ev.length, n)); muestra(instantaneo !== false); }
+function irCap(k) { callaNarrador(); cap = Math.max(0, Math.min(CAPS.length - 1, k)); i = 0;
+  if (CAPS[cap].vel) { porSegundo = CAPS[cap].vel; if (![...vel.options].some(o => +o.value === porSegundo)) { const o = document.createElement("option"); o.value = porSegundo; o.textContent = porSegundo + " por segundo"; vel.appendChild(o); } vel.value = porSegundo; } limpiaActores(); muestra(true); if (protagonista) { mira.set(protagonista.hasta.x, 0, protagonista.hasta.z); miraMeta.copy(mira); } }
+function pausa() { callaNarrador(); andando = false; play.textContent = "▶ Reproducir"; }
+function arranca() {
+  if (cartel && cartel.tipo === "final") { irCap(0); cartel = { tipo: "portada", t: 0 }; }
+  if (cartel && cartel.tipo === "portada") cartel = { tipo: "capitulo", t: 0 };
+  preparaAudio(); if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  andando = true; play.textContent = "⏸ Pausar"; deuda = 0; espera = 0;
+}
+function tic(ahora) {
+  const dt = Math.min(0.1, (ahora - antes) / 1000); antes = ahora;
+  if (cartel) cartel.t += dt;
+  if (andando) {
+    if (narra) { narra.t += dt; if (narra.t >= narra.dura) narra = null; }
+    if (cartel && cartel.tipo === "capitulo") { if (cartel.t > 2.8) { cartel = null; espera = dispara(); } }
+    else if (cartel && cartel.tipo === "final") { if (cartel.t > 6 && grabadora) detenerGrabacion(); }
+    else if (espera > 0) espera -= dt;
+    else {
+      const p = CAPS[cap]; deuda += dt * porSegundo;
+      while (deuda >= 1 && i < p.ev.length) { deuda -= 1; i++; muestra(porSegundo > 25);
+        const habla = dispara(); if (habla) { espera = habla; deuda = 0; break; }
+        if (p.ev[i - 1][0] === 5) { espera = 2.4; deuda = 0; break; }
+        if (p.ev[i - 1][0] === 1 && porSegundo <= 12) { espera = 0.9; deuda = 0; break; } }
+      if (i >= p.ev.length && espera <= 0) { if (cap < CAPS.length - 1) { irCap(cap + 1); cartel = { tipo: "capitulo", t: 0 }; } else { cartel = { tipo: "final", t: 0 }; if (!grabadora) pausa(); } }
+    }
+  }
+  pinta(dt); requestAnimationFrame(tic);
+}
+play.onclick = () => andando ? pausa() : arranca();
+document.getElementById("atras").onclick = () => { pausa(); ir(i - 1); };
+document.getElementById("adelante").onclick = () => { pausa(); ir(i + 1, false); };
+document.getElementById("capAtras").onclick = () => { pausa(); cartel = null; irCap(i > 0 ? cap : cap - 1); };
+document.getElementById("capAdelante").onclick = () => { pausa(); cartel = null; irCap(cap + 1); };
+document.getElementById("azar").onclick = () => { pausa(); ir(1 + Math.floor(Math.random() * CAPS[cap].ev.length)); };
+vel.onchange = () => { porSegundo = +vel.value; };
+tiempo.oninput = () => { pausa(); ir(+tiempo.value); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.key === " ") { e.preventDefault(); play.click(); } else if (e.key === "ArrowRight") { pausa(); ir(i + 1, false); } else if (e.key === "ArrowLeft") { pausa(); ir(i - 1); }
+});
+let grabadora = null, trozos = [];
+function detenerGrabacion() { if (grabadora && grabadora.state !== "inactive") grabadora.stop(); pausa(); }
+grabar.onclick = () => {
+  if (grabadora) { detenerGrabacion(); return; }
+  if (!lienzo.captureStream || !window.MediaRecorder) { grabar.textContent = "Este navegador no graba: use Chrome o Firefox"; return; }
+  const tipo = ["video/webm;codecs=vp9", "video/webm", "video/mp4"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+  preparaAudio(); const flujo = lienzo.captureStream(30);
+  if (salidaGrabacion) for (const pista of salidaGrabacion.stream.getAudioTracks()) flujo.addTrack(pista);
+  trozos = []; grabadora = new MediaRecorder(flujo, tipo ? { mimeType: tipo, videoBitsPerSecond: 10e6 } : {});
+  grabadora.ondataavailable = e => { if (e.data.size) trozos.push(e.data); };
+  grabadora.onstop = () => { const b = new Blob(trozos, { type: grabadora.mimeType || "video/webm" }), a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "pelicula." + (b.type.includes("mp4") ? "mp4" : "webm"); a.click();
+    grabadora = null; grabar.textContent = "● Grabar video"; grabar.classList.remove("grabando"); };
+  pausa(); irCap(0); cartel = { tipo: "portada", t: 0 }; grabadora.start(); grabar.textContent = "■ Detener y descargar"; grabar.classList.add("grabando"); setTimeout(arranca, 2500);
+};
+preparaRastro();
+irCap(0); cartel = { tipo: "portada", t: 0 };
+try { preparaAudio(); } catch (e) {}          // las voces se decodifican desde ya; suenan cuando se reproduce
+requestAnimationFrame(tic);
+</script>
+</body>
+</html>

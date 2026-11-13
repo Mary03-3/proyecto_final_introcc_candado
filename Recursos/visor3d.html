@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><!--TITULO--></title>
+<style>
+  :root { --fondo:#161a22; --tinta:#eef1f5; --suave:#a3acb8; --borde:#343b47; --boton:#1f2530; --activo:#6ea0f5; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--fondo); color:var(--tinta);
+         font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 1320px; margin: 0 auto; padding: 14px 16px 28px; }
+  canvas#escena { width:100%; height:auto; display:block; border-radius:12px; border:1px solid var(--borde); background:#0f1218; }
+  .barra { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px; }
+  button, select { font: inherit; font-size:15px; color:var(--tinta); background:var(--boton);
+           border:1px solid var(--borde); border-radius:8px; padding:7px 12px; cursor:pointer; min-height:38px; }
+  button:hover { border-color: var(--activo); }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--activo); outline-offset:2px; }
+  button.principal { background:var(--activo); border-color:var(--activo); color:#0f1218; font-weight:700; min-width:112px; }
+  button.grabando { background:#d64545; border-color:#d64545; color:#fff; }
+  input[type=range] { flex:1 1 220px; min-width:140px; accent-color: var(--activo); }
+  label { font-size:14px; color:var(--suave); }
+  .ayuda { margin-top:10px; font-size:13.5px; color:var(--suave); line-height:1.5; }
+  kbd { border:1px solid var(--borde); border-radius:4px; padding:0 5px; font-size:12px; background:var(--boton); }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="escena" width="1920" height="1080" aria-label="Película de la búsqueda"></canvas>
+  <div class="barra">
+    <button id="capAtras" title="Capítulo anterior">⏮ Capítulo</button>
+    <button id="atras" title="Un evento atrás">◀ Paso</button>
+    <button id="play" class="principal">▶ Reproducir</button>
+    <button id="adelante" title="Un evento adelante">Paso ▶</button>
+    <button id="capAdelante" title="Capítulo siguiente">Capítulo ⏭</button>
+    <button id="azar" title="Saltar a un evento cualquiera de este capítulo y pausar">Al azar</button>
+    <label for="vel">Velocidad</label>
+    <select id="vel"></select>
+    <input id="tiempo" type="range" min="0" max="1" value="0" step="1" aria-label="Posición en el capítulo">
+    <button id="grabar" title="Graba la película desde el comienzo y descarga el video">● Grabar video</button>
+  </div>
+  <p class="ayuda">Teclado: <kbd>espacio</kbd> reproduce o pausa, <kbd>←</kbd> <kbd>→</kbd> avanzan un evento.
+  «Grabar video» reproduce la película completa desde la portada y descarga un video sin sonido; la narración se agrega después.</p>
+</main>
+<script>/*THREE*/</script>
+<script>
+"use strict";
+const D = /*DATOS*/;
+const COLOR = ["#35b56a", "#e25555", "#4f8df0", "#9a6be0", "#f29a2e", "#e9bd1c"];
+const VERBO = ["AVANZA", "RECHAZA", "DEDUCE", "PODA", "RETROCEDE", "SOLUCIÓN"];
+const ROTULO = ["avanza", "rechaza", "deduce", "poda", "retrocede", "solución"];
+const W = 1280, H = 720, ESC = 1.5, VX = 20, VY = 78, VW = 830, VH = 622;      // la ventana 3D dentro del cuadro
+const FUENTE = 'system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif';
+const T = { fondo:"#161a22", tarjeta:"#1f2530", tinta:"#eef1f5", suave:"#a3acb8", borde:"#343b47", pila:"#3a4352" };
+const lienzo = document.getElementById("escena"), g = lienzo.getContext("2d");
+const [NF, NC] = D.fijo.n;
+
+// ====================================================================== la escena 3D
+const render = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+render.setSize(VW * ESC, VH * ESC, false);
+render.shadowMap.enabled = true; render.shadowMap.type = THREE.PCFSoftShadowMap;
+render.setClearColor("#8fb7d9");
+const escena = new THREE.Scene();
+escena.fog = new THREE.Fog("#8fb7d9", 40, 90);
+const lado = Math.max(NF, NC);
+const camara = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 200);
+function encuadra() {
+  const alto = lado * 1.02 + 1.6, ancho = alto * VW / VH;
+  camara.left = -ancho / 2; camara.right = ancho / 2; camara.top = alto / 2; camara.bottom = -alto / 2;
+  camara.position.set(NC / 2 + 20, 24, NF / 2 + 20);
+  camara.lookAt(NC / 2 - 0.15, 0, NF / 2 - 0.15);
+  camara.updateProjectionMatrix();
+}
+encuadra();
+escena.add(new THREE.HemisphereLight("#ffffff", "#8d9bb0", 0.95));
+const sol = new THREE.DirectionalLight("#fff4dd", 1.15);
+sol.position.set(NC / 2 + 7, 16, NF / 2 - 4); sol.target.position.set(NC / 2, 0, NF / 2);
+sol.castShadow = true; sol.shadow.mapSize.set(2048, 2048);
+const sc = sol.shadow.camera; sc.left = -lado; sc.right = lado; sc.top = lado; sc.bottom = -lado; sc.near = 1; sc.far = 60;
+sol.shadow.radius = 4; sol.shadow.bias = -0.0005;
+escena.add(sol); escena.add(sol.target);
+
+const mat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85, metalness: 0.02 });
+function pieza(geo, color, x, y, z, sombra) {
+  const m = new THREE.Mesh(geo, mat(color)); m.position.set(x, y, z);
+  m.castShadow = sombra !== false; m.receiveShadow = true; return m;
+}
+const caja = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+const cil = (r1, r2, h, n) => new THREE.CylinderGeometry(r1, r2, h, n || 24);
+const bola = r => new THREE.SphereGeometry(r, 24, 16);
+
+// el suelo del mundo
+const suelo = pieza(new THREE.CylinderGeometry(lado * 2.2, lado * 2.2, 0.2, 48), "#7fae8a", NC / 2, -0.26, NF / 2, false);
+escena.add(suelo);
+const losa = pieza(caja(NC + 0.5, 0.16, NF + 0.5), "#e9e2d3", NC / 2, -0.1, NF / 2, false); escena.add(losa);
+
+function letrero(texto, color, px, negrita) {
+  const c = document.createElement("canvas"); c.width = 512; c.height = 128;
+  const x = c.getContext("2d"); x.font = (negrita ? "800 " : "600 ") + px + "px " + FUENTE;
+  x.fillStyle = color; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText(texto, 256, 66);
+  const t = new THREE.CanvasTexture(c); t.anisotropy = 4; return t;
+}
+
+function mueble(tipo, color) {
+  const G = new THREE.Group();
+  const pon = (geo, col, x, y, z) => G.add(pieza(geo, col, x, y, z));
+  if (tipo === "cama") { pon(caja(0.8, 0.26, 0.9), color, 0, 0.13, 0); pon(caja(0.74, 0.1, 0.84), "#f3efe6", 0, 0.31, 0); pon(caja(0.5, 0.1, 0.24), "#ffffff", 0, 0.4, -0.27); }
+  else if (tipo === "mesa") { pon(caja(0.84, 0.08, 0.84), color, 0, 0.5, 0); for (const [a, b] of [[-1,-1],[1,-1],[-1,1],[1,1]]) pon(caja(0.08, 0.46, 0.08), color, a * 0.34, 0.23, b * 0.34); }
+  else if (tipo === "planta") { pon(cil(0.24, 0.18, 0.3), "#b5653a", 0, 0.15, 0); pon(bola(0.3), color, 0, 0.56, 0); pon(bola(0.2), color, 0.14, 0.8, 0.05); }
+  else if (tipo === "estufa") { pon(caja(0.84, 0.6, 0.84), color, 0, 0.3, 0); pon(caja(0.86, 0.05, 0.86), "#2b2f3a", 0, 0.625, 0); for (const [a, b] of [[-1,-1],[1,-1],[-1,1],[1,1]]) pon(cil(0.12, 0.12, 0.03), "#e25555", a * 0.2, 0.66, b * 0.2); }
+  else if (tipo === "piano") { pon(caja(0.9, 0.62, 0.5), color, 0, 0.31, -0.12); pon(caja(0.9, 0.08, 0.26), color, 0, 0.42, 0.24); pon(caja(0.8, 0.03, 0.18), "#ffffff", 0, 0.475, 0.26); }
+  else if (tipo === "fuente") { pon(cil(0.44, 0.46, 0.24, 28), "#c9c2b4", 0, 0.12, 0); pon(cil(0.36, 0.36, 0.05, 28), color, 0, 0.25, 0); pon(cil(0.07, 0.09, 0.5), "#c9c2b4", 0, 0.37, 0); pon(bola(0.1), color, 0, 0.66, 0); }
+  else if (tipo === "barril") { pon(cil(0.3, 0.3, 0.66), color, 0, 0.33, 0); pon(cil(0.315, 0.315, 0.05), "#3b3f48", 0, 0.16, 0); pon(cil(0.315, 0.315, 0.05), "#3b3f48", 0, 0.5, 0); }
+  else if (tipo === "telar") { pon(caja(0.08, 0.8, 0.08), color, -0.36, 0.4, 0); pon(caja(0.08, 0.8, 0.08), color, 0.36, 0.4, 0); pon(caja(0.8, 0.08, 0.08), color, 0, 0.78, 0); pon(caja(0.66, 0.5, 0.03), "#d9486e", 0, 0.45, 0); }
+  else pon(caja(0.7, 0.6, 0.7), color, 0, 0.3, 0);
+  return G;
+}
+
+// lo que no cambia
+for (const c of D.fijo.c) {
+  if (c[0] === "p") escena.add(pieza(caja(0.96, 0.1, 0.96), c[3], c[2] + 0.5, 0.0, c[1] + 0.5, false));
+  else if (c[0] === "m") {
+    const alto = (c[4] || c[3] === "S" || c[3] === "E") ? 0.2 : 1.0, gr = 0.1;
+    const horiz = (c[3] === "N" || c[3] === "S");
+    const x = c[2] + (c[3] === "E" ? 1 : c[3] === "O" ? 0 : 0.5), z = c[1] + (c[3] === "S" ? 1 : c[3] === "N" ? 0 : 0.5);
+    escena.add(pieza(horiz ? caja(1.1, alto, gr) : caja(gr, alto, 1.1), alto > 0.5 ? "#f6f1e7" : "#cfc6b4", x, 0.05 + alto / 2, z));
+  } else if (c[0] === "b") { const m = mueble(c[3], c[4]); m.position.set(c[2] + 0.5, 0.05, c[1] + 0.5); escena.add(m); }
+  else if (c[0] === "r") {
+    const p = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.375),
+      new THREE.MeshBasicMaterial({ map: letrero(c[3], "rgba(40,45,58,0.7)", 60, true), transparent: true, depthWrite: false }));
+    p.rotation.x = -Math.PI / 2; p.rotation.z = Math.PI / 4; p.position.set(c[2] + 0.5, 0.062, c[1] + 0.5); escena.add(p);
+  } else if (c[0] === "u") escena.add(pieza(caja(0.96, 0.04, 0.96), "#20252f", c[2] + 0.5, -0.02, c[1] + 0.5, false));
+}
+
+// lo que cambia: actores con nombre (se mueven) y marcas (se rehacen)
+const actores = new Map();          // nombre -> {grupo, desde, hasta, t, estado}
+const marcas = new THREE.Group(); escena.add(marcas);
+
+function hazActor(c) {
+  const G = new THREE.Group();
+  const pon = (geo, col, x, y, z) => { const m = pieza(geo, col, x, y, z); G.add(m); return m; };
+  if (c[0] === "h") {
+    pon(cil(0.17, 0.27, 0.52), c[4], 0, 0.31, 0); pon(bola(0.19), "#f2d3b3", 0, 0.72, 0);
+    pon(cil(0.2, 0.2, 0.06), c[4], 0, 0.87, 0);
+    pon(bola(0.032), "#1f2430", 0.17, 0.75, 0.03); pon(bola(0.032), "#1f2430", 0.03, 0.75, 0.17);
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: letrero(c[5], "#ffffff", 96, true), depthTest: false }));
+    s.scale.set(1.5, 0.375, 1); s.position.set(0, 0.32, 0); s.renderOrder = 5; G.add(s);
+  } else if (c[0] === "k") {
+    pon(caja(0.62, 0.34, 0.44), "#8a5a2b", 0, 0.22, 0); pon(cil(0.22, 0.22, 0.62, 20), "#9c6a35", 0, 0.39, 0).rotation.z = Math.PI / 2;
+    pon(caja(0.1, 0.5, 0.47), "#e9bd1c", 0, 0.3, 0); pon(caja(0.14, 0.12, 0.05), "#e9bd1c", 0, 0.36, 0.23);
+  } else if (c[0] === "j") {
+    pon(bola(0.26), "#f7f4ee", 0, 0.34, 0); pon(bola(0.19), "#f7f4ee", 0, 0.7, 0.06);
+    pon(caja(0.07, 0.34, 0.05), "#f7f4ee", -0.08, 1.0, 0.02); pon(caja(0.07, 0.34, 0.05), "#f7f4ee", 0.08, 1.0, 0.02);
+    pon(bola(0.03), "#1f2430", -0.07, 0.74, 0.23); pon(bola(0.03), "#1f2430", 0.07, 0.74, 0.23); pon(bola(0.035), "#e58fa8", 0, 0.68, 0.25);
+    pon(bola(0.08), "#ffffff", 0, 0.3, -0.25);
+  } else { pon(caja(0.66, 0.6, 0.66), c[3 + 1] || "#c58b4e", 0, 0.35, 0); }
+  return G;
+}
+
+function ponCuadro(cuadro, tipoEvento, instantaneo) {
+  const vistos = new Set();
+  while (marcas.children.length) marcas.remove(marcas.children[0]);
+  for (const c of cuadro.c) {
+    if (c[0] === "h" || c[0] === "k" || c[0] === "j" || c[0] === "o") {
+      const nombre = c[1], f = c[2], col = c[3]; vistos.add(nombre);
+      const meta = new THREE.Vector3(col + 0.5, 0.05, f + 0.5);
+      let a = actores.get(nombre);
+      if (!a) {
+        a = { grupo: hazActor(c), desde: meta.clone(), hasta: meta.clone(), t: instantaneo ? 1 : 0, modo: "nace" };
+        a.grupo.position.copy(meta); escena.add(a.grupo); actores.set(nombre, a);
+      } else if (!a.hasta.equals(meta) || a.modo === "muere") {
+        a.desde = a.grupo.position.clone(); a.desde.y = 0.05; a.hasta = meta; a.t = instantaneo ? 1 : 0; a.modo = "camina";
+      }
+      a.rojo = (tipoEvento === 1);
+    } else if (c[0] === "x") {
+      for (const giro of [0, Math.PI / 2]) {
+        const m = new THREE.Mesh(caja(0.62, 0.03, 0.11), new THREE.MeshBasicMaterial({ color: c[3] }));
+        m.position.set(c[2] + 0.5, 0.075, c[1] + 0.5); m.rotation.y = giro; marcas.add(m);
+      }
+    } else if (c[0] === "l") {
+      const m = new THREE.Mesh(caja(0.9, 0.02, 0.9), new THREE.MeshBasicMaterial({ color: c[3], transparent: true, opacity: 0.75 }));
+      m.position.set(c[2] + 0.5, 0.068, c[1] + 0.5); marcas.add(m);
+    } else if (c[0] === "f") {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: letrero(c[3], c[4], 100, true), depthTest: false }));
+      s.scale.set(1.8, 0.45, 1); s.position.set(c[2] + 0.5, 0.5, c[1] + 0.5); marcas.add(s);
+    }
+  }
+  for (const [nombre, a] of actores) if (!vistos.has(nombre) && a.modo !== "muere") { a.modo = "muere"; a.t = instantaneo ? 1 : 0; }
+}
+
+function animaActores(dt, dur) {
+  for (const [nombre, a] of actores) {
+    a.t = Math.min(1, a.t + dt / dur);
+    const k = a.t < 0.5 ? 2 * a.t * a.t : 1 - Math.pow(-2 * a.t + 2, 2) / 2;
+    if (a.modo === "nace") { a.grupo.position.set(a.hasta.x, a.hasta.y + (1 - k) * 2.2, a.hasta.z); a.grupo.scale.setScalar(0.5 + 0.5 * k); }
+    else if (a.modo === "camina") { a.grupo.position.lerpVectors(a.desde, a.hasta, k); a.grupo.position.y = 0.05 + Math.sin(Math.PI * k) * 0.45; a.grupo.scale.setScalar(1); }
+    else if (a.modo === "muere") { a.grupo.scale.setScalar(Math.max(0.001, 1 - k)); a.grupo.position.y = 0.05 + k * 0.8; if (a.t >= 1) { escena.remove(a.grupo); actores.delete(nombre); } }
+    if (a.rojo && a.modo !== "muere") a.grupo.rotation.z = Math.sin(performance.now() / 28) * 0.16 * (1 - a.t * 0.4); else a.grupo.rotation.z = 0;
+  }
+}
+function limpiaActores() { for (const [n, a] of actores) escena.remove(a.grupo); actores.clear(); }
+
+// ====================================================================== la pelicula
+const CAPS = D.caps;
+for (const p of CAPS) {
+  p.acum = [new Array(6).fill(0)];
+  for (const e of p.ev) { const c = p.acum[p.acum.length - 1].slice(); c[e[0]]++; p.acum.push(c); }
+  p.recortada = p.ev.length < p.total;
+}
+const PILA = Math.max(1, ...CAPS.map(p => p.pila));
+let cap = 0, i = 0, andando = false, porSegundo = D.velocidad, deuda = 0, antes = performance.now(), espera = 0;
+let cartel = { tipo: "portada", t: 0 };      // portada | capitulo | final | null
+
+const miles = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+function tarjeta(x, y, w, h, r, relleno, borde, gr) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+  if (relleno) { g.fillStyle = relleno; g.fill(); } if (borde) { g.strokeStyle = borde; g.lineWidth = gr || 1; g.stroke(); }
+}
+function letra(t, x, y, px, color, peso, alinea) {
+  g.font = (peso || 400) + " " + px + "px " + FUENTE; g.fillStyle = color; g.textAlign = alinea || "left"; g.textBaseline = "middle"; g.fillText(t, x, y);
+}
+function recorta(t, ancho, px, peso) {
+  g.font = (peso || 400) + " " + px + "px " + FUENTE;
+  if (g.measureText(t).width <= ancho) return t;
+  while (t.length > 1 && g.measureText(t + "…").width > ancho) t = t.slice(0, -1);
+  return t + "…";
+}
+function renglones(t, ancho, px, peso) {
+  g.font = (peso || 400) + " " + px + "px " + FUENTE; const out = []; let linea = "";
+  for (const pal of t.split(" ")) { const prueba = linea ? linea + " " + pal : pal;
+    if (g.measureText(prueba).width > ancho && linea) { out.push(linea); linea = pal; } else linea = prueba; }
+  if (linea) out.push(linea); return out;
+}
+
+function eventoActual() { const p = CAPS[cap]; return i > 0 ? p.ev[i - 1] : null; }
+
+function pinta(dt) {
+  const p = CAPS[cap], ev = eventoActual(), cuadro = ev ? D.cuadros[ev[1]] : null;
+  animaActores(dt, Math.max(0.05, Math.min(0.42, 0.75 / porSegundo)));
+  render.render(escena, camara);
+  g.setTransform(ESC, 0, 0, ESC, 0, 0);
+  g.fillStyle = T.fondo; g.fillRect(0, 0, W, H);
+  // titulo
+  letra(recorta(D.titulo, 760, 27, 800), 24, 40, 27, T.tinta, 800);
+  letra(recorta(p.nombre, 420, 19, 700), W - 24, 40, 19, COLOR[2], 700, "right");
+  // la ventana 3D
+  g.save(); tarjeta(VX, VY, VW, VH, 14); g.clip(); g.drawImage(render.domElement, VX, VY, VW, VH); g.restore();
+  tarjeta(VX, VY, VW, VH, 14, null, ev ? COLOR[ev[0]] : T.borde, ev ? 4 : 1);
+  { const bx = VX + 62, by = VY + VH - 58, r = 30;
+    g.fillStyle = "rgba(15,18,24,0.55)"; g.beginPath(); g.arc(bx, by, 46, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = "#ffffff"; g.lineWidth = 2.5; g.lineCap = "round";
+    for (const [dx, dy, t] of [[0.82, -0.57, "N"], [-0.82, -0.57, "O"]]) {
+      g.beginPath(); g.moveTo(bx, by + 6); g.lineTo(bx + dx * r * 0.7, by + 6 + dy * r * 0.7); g.stroke();
+      letra(t, bx + dx * r, by + 4 + dy * r, 15, "#ffffff", 800, "center"); } }
+  if (cuadro && cuadro.v) {
+    g.font = "800 26px " + FUENTE; const an = g.measureText(cuadro.v).width + 56;
+    tarjeta(VX + VW / 2 - an / 2, VY + 22, an, 56, 28, COLOR[5]); letra(cuadro.v, VX + VW / 2, VY + 51, 26, "#1b1e26", 800, "center");
+  }
+  // la columna de la derecha
+  const x = VX + VW + 18, w = W - x - 20; let y = VY;
+  tarjeta(x, y, w, 196, 12, T.tarjeta, T.borde, 1);
+  if (ev) {
+    g.font = "800 22px " + FUENTE; const an = g.measureText(VERBO[ev[0]]).width + 34;
+    tarjeta(x + 16, y + 16, an, 40, 20, COLOR[ev[0]]); letra(VERBO[ev[0]], x + 16 + an / 2, y + 37, 22, "#ffffff", 800, "center");
+    const rs = renglones(ev[3], w - 32, 15.5, 400).slice(0, 2);
+    rs.forEach((r, k) => letra(r, x + 16, y + 76 + k * 20, 15.5, T.tinta, 400));
+  } else letra("listo para empezar", x + 16, y + 37, 17, T.suave, 400);
+  const cuenta = p.acum[i], orden = [0, 1, 4, 2, 3, 5];
+  for (let j = 0; j < 6; j++) {
+    const t = orden[j], cx = x + 16 + (j % 3) * ((w - 32) / 3), cy = y + 132 + Math.floor(j / 3) * 34;
+    g.fillStyle = COLOR[t]; g.beginPath(); g.arc(cx + 6, cy, 5.5, 0, 2 * Math.PI); g.fill();
+    letra(miles(cuenta[t]), cx + 18, cy, 17, T.tinta, 700);
+    const an = g.measureText(miles(cuenta[t])).width; letra(ROTULO[t], cx + 23 + an, cy + 1, 12.5, T.suave, 400);
+  }
+  y += 208;
+  // la pila
+  tarjeta(x, y, w, 46, 12, T.tarjeta, T.borde, 1); letra("pila", x + 16, y + 23, 13, T.suave, 400);
+  const prof = ev ? ev[2] : 0, np = Math.max(PILA, 4), bw = Math.min(30, (w - 76) / np - 4);
+  for (let j = 0; j < np; j++) tarjeta(x + 56 + j * (bw + 4), y + 13, bw, 20, 4, j < prof ? COLOR[0] : null, j < prof ? null : T.pila, 1);
+  y += 58;
+  // el panel del mundo (las pistas)
+  const alto = VY + VH - y; tarjeta(x, y, w, alto, 12, T.tarjeta, T.borde, 1);
+  const panel = (cuadro && cuadro.p) || PANEL0;
+  if (panel) {
+    letra(panel[0], x + 16, y + 24, 15, T.suave, 700);
+    let yy = y + 52; const px = panel.length > 10 ? 13 : 14.5, salto = px + 5;
+    for (const L of panel.slice(1)) {
+      const rs = renglones(L[0], w - 54, px, L[2] ? 700 : 400);
+      if (yy + rs.length * salto > y + alto - 34) break;
+      if (L[2]) tarjeta(x + 8, yy - salto / 2 - 3, w - 16, rs.length * salto + 6, 6, "rgba(110,160,245,0.16)");
+      const marca = L[1] === "bien" ? COLOR[0] : L[1] === "mal" ? COLOR[1] : T.pila;
+      g.fillStyle = marca; g.beginPath(); g.arc(x + 22, yy, 5, 0, 2 * Math.PI); g.fill();
+      rs.forEach((r, k) => letra(r, x + 36, yy + k * salto, px, L[1] === "mal" ? "#ff9a9a" : T.tinta, L[2] ? 700 : 400));
+      yy += rs.length * salto + 7;
+    }
+  }
+  const pie = p.recortada ? "primeros " + miles(p.ev.length) + " de " + miles(p.total) + " eventos" : "evento " + miles(i) + " de " + miles(p.total);
+  letra(pie, x + 16, y + alto - 18, 13, T.suave, 400);
+  if (cartel) pintaCartel();
+  tiempo.max = p.ev.length; tiempo.value = i;
+}
+let PANEL0 = null; for (const c of D.cuadros) if (c.p) { PANEL0 = [c.p[0]].concat(c.p.slice(1).map(L => [L[0], "", 0])); break; }
+
+function pintaCartel() {
+  const a = Math.min(1, cartel.t / 0.25);
+  g.fillStyle = "rgba(15,18,24," + (cartel.tipo === "capitulo" ? 0.72 * a : 0.9 * a) + ")"; g.fillRect(0, 0, W, H);
+  g.globalAlpha = a;
+  if (cartel.tipo === "portada") {
+    letra(D.titulo, W / 2, 250, 56, T.tinta, 800, "center");
+    renglones(D.pregunta, 900, 26, 400).forEach((r, k) => letra(r, W / 2, 330 + k * 36, 26, COLOR[5], 400, "center"));
+    letra(CAPS.length + " generaciones del mismo agente · ▶ para empezar", W / 2, 470, 19, T.suave, 400, "center");
+  } else if (cartel.tipo === "capitulo") {
+    const p = CAPS[cap];
+    letra(p.nombre, W / 2, 310, 50, T.tinta, 800, "center");
+    renglones(p.desc, 860, 23, 400).forEach((r, k) => letra(r, W / 2, 380 + k * 32, 23, T.suave, 400, "center"));
+  } else {
+    letra("Lo que cambió entre generaciones", W / 2, 150, 38, T.tinta, 800, "center");
+    const cols = ["", "estados", "rechazos", "deducciones", "podas", "eventos"], x0 = 190, dx = [0, 400, 520, 650, 760, 900];
+    cols.forEach((c, k) => letra(c, x0 + dx[k], 230, 17, T.suave, 700, k ? "right" : "left"));
+    CAPS.forEach((p, j) => {
+      const y = 280 + j * 58; tarjeta(x0 - 20, y - 26, 940, 50, 10, T.tarjeta, T.borde, 1);
+      letra(recorta(p.nombre, 330, 20, 700), x0, y, 20, T.tinta, 700);
+      [p.cuenta[0], p.cuenta[1], p.cuenta[2], p.cuenta[3], p.total].forEach((v, k) => letra(miles(v), x0 + dx[k + 1], y, 20, k === 4 ? COLOR[5] : T.tinta, 700, "right"));
+    });
+    const ult = CAPS[CAPS.length - 1].ev; const v = D.cuadros[ult[ult.length - 1][1]].v || "";
+    let res = ""; for (const p of CAPS) for (const e of p.ev) if (D.cuadros[e[1]].v) res = D.cuadros[e[1]].v;
+    if (res) letra(res, W / 2, 300 + CAPS.length * 58 + 40, 30, COLOR[5], 800, "center");
+  }
+  g.globalAlpha = 1;
+}
+
+// ---------- controles ----------
+const play = document.getElementById("play"), tiempo = document.getElementById("tiempo"),
+      vel = document.getElementById("vel"), grabar = document.getElementById("grabar");
+for (const v of [1, 2, 3, 6, 12, 25, 60, 150]) { const o = document.createElement("option"); o.value = v; o.textContent = v + " por segundo"; vel.appendChild(o); }
+if (![...vel.options].some(o => +o.value === porSegundo)) porSegundo = 6;
+vel.value = porSegundo;
+
+function muestra(instantaneo) {
+  const ev = eventoActual();
+  if (ev) ponCuadro(D.cuadros[ev[1]], ev[0], instantaneo); else ponCuadro({ c: [] }, -1, true);
+}
+function ir(n, instantaneo) { cartel = null; i = Math.max(0, Math.min(CAPS[cap].ev.length, n)); muestra(instantaneo !== false); }
+function irCap(k) { cap = Math.max(0, Math.min(CAPS.length - 1, k)); i = 0; limpiaActores(); muestra(true); }
+function pausa() { andando = false; play.textContent = "▶ Reproducir"; }
+function arranca() {
+  if (cartel && cartel.tipo === "final") { irCap(0); cartel = { tipo: "portada", t: 0 }; }
+  if (cartel && cartel.tipo === "portada") { cartel = { tipo: "capitulo", t: 0 }; }
+  andando = true; play.textContent = "⏸ Pausar"; deuda = 0; espera = 0;
+}
+function tic(ahora) {
+  const dt = Math.min(0.1, (ahora - antes) / 1000); antes = ahora;
+  if (cartel) cartel.t += dt;
+  if (andando) {
+    if (cartel && cartel.tipo === "capitulo") { if (cartel.t > 2.6) cartel = null; }
+    else if (cartel && cartel.tipo === "final") { if (cartel.t > 6 && grabadora) detenerGrabacion(); }
+    else if (espera > 0) espera -= dt;
+    else {
+      const p = CAPS[cap]; deuda += dt * porSegundo;
+      while (deuda >= 1 && i < p.ev.length) {
+        deuda -= 1; i++; muestra(porSegundo > 25);
+        if (p.ev[i - 1][0] === 5) { espera = 2.2; deuda = 0; break; }
+      }
+      if (i >= p.ev.length && espera <= 0) {
+        if (cap < CAPS.length - 1) { espera = 0; irCap(cap + 1); cartel = { tipo: "capitulo", t: 0 }; }
+        else { cartel = { tipo: "final", t: 0 }; if (!grabadora) pausa(); }
+      }
+    }
+  }
+  pinta(dt);
+  requestAnimationFrame(tic);
+}
+play.onclick = () => andando ? pausa() : arranca();
+document.getElementById("atras").onclick = () => { pausa(); ir(i - 1); };
+document.getElementById("adelante").onclick = () => { pausa(); ir(i + 1, false); };
+document.getElementById("capAtras").onclick = () => { pausa(); cartel = null; irCap(i > 0 ? cap : cap - 1); };
+document.getElementById("capAdelante").onclick = () => { pausa(); cartel = null; irCap(cap + 1); };
+document.getElementById("azar").onclick = () => { pausa(); limpiaActores(); ir(1 + Math.floor(Math.random() * CAPS[cap].ev.length)); };
+vel.onchange = () => { porSegundo = +vel.value; };
+tiempo.oninput = () => { pausa(); ir(+tiempo.value); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.key === " ") { e.preventDefault(); play.click(); }
+  else if (e.key === "ArrowRight") { pausa(); ir(i + 1, false); }
+  else if (e.key === "ArrowLeft") { pausa(); ir(i - 1); }
+});
+
+// ---------- grabar el video ----------
+let grabadora = null, trozos = [];
+function detenerGrabacion() { if (grabadora && grabadora.state !== "inactive") grabadora.stop(); pausa(); }
+grabar.onclick = () => {
+  if (grabadora) { detenerGrabacion(); return; }
+  if (!lienzo.captureStream || !window.MediaRecorder) { grabar.textContent = "Este navegador no graba: use Chrome o Firefox"; return; }
+  const tipo = ["video/webm;codecs=vp9", "video/webm", "video/mp4"].find(t => MediaRecorder.isTypeSupported(t)) || "";
+  trozos = []; grabadora = new MediaRecorder(lienzo.captureStream(30), tipo ? { mimeType: tipo, videoBitsPerSecond: 8e6 } : {});
+  grabadora.ondataavailable = e => { if (e.data.size) trozos.push(e.data); };
+  grabadora.onstop = () => {
+    const b = new Blob(trozos, { type: grabadora.mimeType || "video/webm" }), a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "pelicula." + (b.type.includes("mp4") ? "mp4" : "webm"); a.click();
+    grabadora = null; grabar.textContent = "● Grabar video"; grabar.classList.remove("grabando");
+  };
+  pausa(); irCap(0); cartel = { tipo: "portada", t: 0 };
+  grabadora.start(); grabar.textContent = "■ Detener y descargar"; grabar.classList.add("grabando");
+  setTimeout(arranca, 2500);
+};
+
+muestra(true);
+requestAnimationFrame(tic);
+</script>
+</body>
+</html>
