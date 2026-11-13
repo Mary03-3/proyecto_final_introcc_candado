@@ -45,7 +45,7 @@ from escena import Escena                 # noqa: E402
 
 from casos_archipielago import CASOS      # noqa: E402
 
-PARED = "#1f7f6e"            # verde mar: el color de las paredes de este mundo
+PARED = "#d9705f"            # coral de arrecife: el color de las paredes de este mundo
 AGUA = "#3a78a8"
 ARENA = "#e6cf8b"
 TINTA = "#14213d"            # numero de una isla a la que aun le faltan puentes

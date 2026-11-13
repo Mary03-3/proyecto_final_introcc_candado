@@ -41,7 +41,7 @@ from escena import Escena                 # noqa: E402
 
 from casos_candado import CASOS           # noqa: E402
 
-PARED = "#2e6b5e"                          # verde petroleo: el color de la sala del candado
+PARED = "#6f7d2c"                          # verde oliva: el color de la sala del candado
 COLOR_RUEDA = ["#c9a86a", "#b8955a"]       # laton claro, alternado por rueda
 COLOR_LECTURA = "#3a3f47"                  # la columna de lectura, donde se para Pixie
 COLOR_DIGITO = "#1f2430"                   # el digito puesto en una rueda

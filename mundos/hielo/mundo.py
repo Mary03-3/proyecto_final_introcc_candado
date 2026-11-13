@@ -23,7 +23,7 @@ from escena import Escena                 # noqa: E402
 from casos_hielo import CASOS             # noqa: E402
 
 DIRECCIONES = (("norte", -1, 0), ("este", 0, 1), ("sur", 1, 0), ("oeste", 0, -1))
-PARED = "#2b9aa8"            # el color de las paredes de la pista (cian de hielo)
+PARED = "#5f7387"            # pizarra azulada: el color de las paredes de la pista
 HIELO = "#a9d6e8"            # el color del piso
 
 
